@@ -1,0 +1,648 @@
+================================================================================
+                    TRADENET - COMPLETE PROGRAM FLOW EXPLANATION
+                           (Beginner-Friendly Guide)
+================================================================================
+
+--------------------------------------------------------------------------------
+WHAT IS TRADENET?
+--------------------------------------------------------------------------------
+
+TradeNet is a trade licensing platform - think of it like a government portal where:
+  - Business Traders    : register their businesses and apply for licenses
+  - Trade Officers      : verify documents and approve/reject applications
+  - Program Managers    : create trade programs and approve subsidies
+  - Compliance Officers : investigate complaints and flag violations
+  - Government Auditors : audit businesses and generate reports
+  - Admins              : manage all users and monitor the system
+
+
+--------------------------------------------------------------------------------
+BIG PICTURE ARCHITECTURE
+--------------------------------------------------------------------------------
+
+  +-----------------------------+
+  |       USER'S BROWSER        |
+  |  Angular Frontend (Port 4200)|
+  |  TradeNet-Frontend/          |
+  +-------------+---------------+
+                |  HTTP Requests (JSON)
+                |  + JWT Token in headers
+                v
+  +------------------------------------------------------+
+  |              6 BACKEND APIs (.NET)                   |
+  |  Admin API      :7001  <- Auth Gateway (Login/Register)
+  |  BusinessTrader :7002                                |
+  |  TradeOfficer   :7003                                |
+  |  ProgramManager :7004                                |
+  |  Compliance     :7005                                |
+  |  GovAuditor     :7006                                |
+  +--------------------------+---------------------------+
+                             |  Entity Framework (ORM)
+                             v
+                 +-----------------------+
+                 |  SQL SERVER DATABASE  |
+                 |  database: "tradenet" |
+                 +-----------------------+
+
+
+--------------------------------------------------------------------------------
+STEP 1 - APP STARTS IN THE BROWSER
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/main.ts
+
+  import { bootstrapApplication } from '@angular/platform-browser';
+  import { appConfig } from './app/app.config';
+  import { App } from './app/app';
+
+  bootstrapApplication(App, appConfig);
+
+Every single line explained:
+  - import { bootstrapApplication }
+      Imports Angular's function that starts the app.
+
+  - import { appConfig }
+      Imports your app's settings (routes, interceptors, etc.).
+
+  - import { App }
+      Imports the root component (the shell of your app).
+
+  - bootstrapApplication(App, appConfig)
+      This is the IGNITION SWITCH. It launches the Angular app,
+      using App as the root HTML element and appConfig as the configuration.
+
+
+--------------------------------------------------------------------------------
+STEP 2 - APP CONFIGURATION
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/app/app.config.ts
+
+  export const appConfig: ApplicationConfig = {
+    providers: [
+      provideRouter(routes),
+      provideHttpClient(
+        withInterceptors([jwtInterceptor])
+      ),
+    ]
+  };
+
+  - provideRouter(routes)
+      Tells Angular "here are all the URLs and which component to show for each".
+
+  - provideHttpClient(...)
+      Enables making HTTP requests to the backend APIs.
+
+  - withInterceptors([jwtInterceptor])
+      Plugs in a "middleman" that automatically adds your login token
+      to every request.
+
+
+--------------------------------------------------------------------------------
+STEP 3 - ROUTES (WHICH PAGE SHOWS FOR WHICH URL)
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/app/app.routes.ts
+
+  { path: '',         redirectTo: '/home', pathMatch: 'full' },
+  { path: 'login',    component: LoginComponent,    canActivate: [guestGuard] },
+  { path: 'register', component: RegisterComponent, canActivate: [guestGuard] },
+  {
+    path: 'admin',
+    component: AdminLayout,
+    canActivate: [authGuard, roleGuard(['SystemAdmin'])],
+    children: [
+      { path: 'dashboard',    loadComponent: () => import('./admin-dashboard') },
+      { path: 'manage-users', loadComponent: () => import('./manage-users') },
+      ...
+    ]
+  },
+
+  - path: ''
+      When URL is just "/", redirect to "/home".
+
+  - canActivate: [guestGuard]
+      Only guests (not logged in) can see login/register pages.
+
+  - canActivate: [authGuard, roleGuard(['SystemAdmin'])]
+      You must be logged in AND be an Admin to see admin pages.
+
+  - loadComponent: () => import(...)
+      LAZY LOADING: the component code is only downloaded when the user
+      actually visits that page (faster initial load).
+
+
+--------------------------------------------------------------------------------
+STEP 4 - GUARDS (SECURITY BOUNCERS)
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/app/core/guards/auth.guard.ts
+
+  export const authGuard: CanActivateFn = () => {
+    const auth   = inject(AuthService);
+    const router = inject(Router);
+
+    if (auth.isLoggedIn()) {
+      return true;                              // allow access
+    }
+    return router.createUrlTree(['/login']);    // kick to login page
+  };
+
+  export const roleGuard = (allowedRoles: string[]): CanActivateFn => () => {
+    const auth   = inject(AuthService);
+    const router = inject(Router);
+
+    if (allowedRoles.includes(auth.role()!)) {
+      return true;                              // your role is in the allowed list
+    }
+    return router.createUrlTree(['/login']);    // wrong role, kick out
+  };
+
+  export const guestGuard: CanActivateFn = () => {
+    const auth   = inject(AuthService);
+    const router = inject(Router);
+
+    if (!auth.isLoggedIn()) {
+      return true;                              // not logged in, can see login page
+    }
+    const roleRoutes: Record<string, string> = {
+      SystemAdmin:    '/admin/dashboard',
+      BusinessTrader: '/business-trader/dashboard',
+      ...
+    };
+    return router.createUrlTree([roleRoutes[auth.role()!]]);
+  };
+
+  - inject(AuthService)
+      Gets the auth service which knows if you're logged in.
+
+  - auth.isLoggedIn()
+      Checks if a JWT token exists in localStorage.
+
+  - auth.role()
+      Reads your role from the saved token data.
+
+  - router.createUrlTree(['/login'])
+      Creates a redirect instruction to the login page.
+
+
+--------------------------------------------------------------------------------
+STEP 5 - USER REGISTERS
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/app/features/auth/components/register/register.component.ts
+
+  onSubmit() {
+    this.authService.register(this.form.value).subscribe({
+      next: () => this.router.navigate(['/login']),
+      error: (err) => this.errorMessage = err.message
+    });
+  }
+
+  - this.form.value
+      The data the user typed into the form.
+
+  - this.authService.register(...)
+      Sends a POST request to the backend.
+
+  - .subscribe({ next: ..., error: ... })
+      "When the response comes back: if success do this, if error do that."
+
+File: TradeNet-Frontend/src/app/core/services/auth.service.ts
+
+  register(req: RegisterRequest): Observable<{ message: string }> {
+    return this.http.post<{ message: string }>(
+      'https://localhost:7001/api/auth/register',
+      req
+    );
+  }
+
+  - this.http.post(url, body)
+      Angular's HTTP client sends a POST request to the Admin API.
+
+  - Observable
+      A "promise-like" thing that will deliver the response when it arrives.
+
+
+--------------------------------------------------------------------------------
+STEP 6 - BACKEND RECEIVES REGISTRATION
+--------------------------------------------------------------------------------
+
+File: TradeNet/TradeNet.Admin.API/Controllers/AuthController.cs
+
+  [HttpPost("register")]
+  public async Task<IActionResult> Register([FromBody] RegisterRequest request)
+  {
+      // 1. Check if email already exists
+      var existing = await _userRepo.GetByEmailAsync(request.Email);
+      if (existing != null)
+          return BadRequest(new { message = "Email already registered" });
+
+      // 2. Force role to BusinessTrader (only admins can create other roles)
+      request.Role = "BusinessTrader";
+
+      // 3. Hash the password (never store plain text!)
+      var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
+
+      // 4. Create the User object
+      var user = new User {
+          FullName  = request.FullName,
+          Email     = request.Email,
+          Password  = hashedPassword,
+          Role      = request.Role,
+          Phone     = request.Phone,
+          Status    = "Active",
+          CreatedAt = DateTime.UtcNow
+      };
+
+      // 5. Save to database
+      await _userRepo.CreateAsync(user);
+
+      // 6. Also create a BusinessTrader profile linked to this user
+      var trader = new BusinessTrader {
+          UserId             = user.Id,
+          FullName           = user.FullName,
+          Email              = user.Email,
+          VerificationStatus = "Pending"
+      };
+      await _traderRepo.CreateAsync(trader);
+
+      return Ok(new { message = "Registration successful" });
+  }
+
+  - [HttpPost("register")]
+      This method handles POST requests to /api/auth/register.
+
+  - [FromBody]
+      Reads the JSON from the request body into the request object.
+
+  - BCrypt.HashPassword(...)
+      Converts "password123" into a scrambled string like "$2a$10$xyz..."
+      Even if hackers steal the database they cannot read the password.
+
+  - await _userRepo.CreateAsync(user)
+      Tells the repository to save the user to the database.
+
+  Two records are created:
+      One in the Users table, and one in the BusinessTraders table.
+
+
+--------------------------------------------------------------------------------
+STEP 7 - REPOSITORY SAVES TO DATABASE
+--------------------------------------------------------------------------------
+
+File: TradeNet/TradeNet.Admin.API/Repositories/UserRepository.cs
+
+  public async Task<User> CreateAsync(User user)
+  {
+      _context.Users.Add(user);           // Stage the new user record
+      await _context.SaveChangesAsync();  // Execute INSERT INTO Users SQL
+      return user;
+  }
+
+  - _context
+      This is the ApplicationDbContext, Entity Framework's connection to SQL Server.
+
+  - _context.Users.Add(user)
+      Stages the record (like putting it in a queue).
+
+  - SaveChangesAsync()
+      Actually executes the SQL:
+      INSERT INTO Users (FullName, Email, Password, ...) VALUES (...)
+
+File: TradeNet/TradeNet.Admin.API/Data/ApplicationDbContext.cs
+
+  public class ApplicationDbContext : DbContext
+  {
+      public DbSet<User>               Users               { get; set; }
+      public DbSet<BusinessTrader>     BusinessTraders     { get; set; }
+      public DbSet<Business>           Businesses          { get; set; }
+      public DbSet<TradeLicense>       TradeLicenses       { get; set; }
+      public DbSet<LicenseApplication> LicenseApplications { get; set; }
+      public DbSet<Transaction>        Transactions        { get; set; }
+      public DbSet<TradeProgram>       TradePrograms       { get; set; }
+      public DbSet<Subsidy>            Subsidies           { get; set; }
+      public DbSet<ComplianceRecord>   ComplianceRecords   { get; set; }
+      public DbSet<Complaint>          Complaints          { get; set; }
+      public DbSet<Violation>          Violations          { get; set; }
+      public DbSet<Audit>              Audits              { get; set; }
+      public DbSet<Report>             Reports             { get; set; }
+      public DbSet<Notification>       Notifications       { get; set; }
+      public DbSet<SystemLog>          SystemLogs          { get; set; }
+  }
+
+  - DbContext
+      Entity Framework's base class that manages the database connection.
+
+  - Each DbSet<X> = one table in the database.
+      DbSet<User> = the Users table.
+
+  - You never write raw SQL.
+      Entity Framework translates your C# code into SQL automatically.
+
+
+--------------------------------------------------------------------------------
+STEP 8 - USER LOGS IN
+--------------------------------------------------------------------------------
+
+Frontend sends login request (auth.service.ts):
+
+  login(req: LoginRequest): Observable<AuthResponse> {
+    return this.http.post<AuthResponse>(
+      'https://localhost:7001/api/auth/login',
+      req
+    ).pipe(
+      tap(response => {
+        localStorage.setItem('tnet_user', JSON.stringify(response));
+        this._user.set(response);
+      })
+    );
+  }
+
+  - tap(response => ...)
+      "Peek" at the response before passing it along, used here to save it.
+
+  - localStorage.setItem(...)
+      Saves to browser storage so you stay logged in even after page refresh.
+
+  - this._user.set(response)
+      Angular signal: updates reactive state so all components instantly
+      know you are logged in.
+
+Backend validates login (AuthController.cs):
+
+  [HttpPost("login")]
+  public async Task<IActionResult> Login([FromBody] LoginRequest request)
+  {
+      // 1. Find user by email
+      var user = await _userRepo.GetByEmailAsync(request.Email);
+      if (user == null || !BCrypt.Verify(request.Password, user.Password))
+          return Unauthorized(new { message = "Invalid credentials" });
+
+      // 2. Check user isn't suspended
+      if (user.Status != "Active")
+          return Unauthorized(new { message = "Account is deactivated" });
+
+      // 3. Build JWT token
+      var tokenHandler    = new JwtSecurityTokenHandler();
+      var key             = Encoding.ASCII.GetBytes(_config["Jwt:Key"]!);
+      var tokenDescriptor = new SecurityTokenDescriptor {
+          Subject = new ClaimsIdentity(new[] {
+              new Claim("userId",          user.Id.ToString()),
+              new Claim(ClaimTypes.Email,  user.Email),
+              new Claim(ClaimTypes.Role,   user.Role),
+              new Claim("fullName",        user.FullName),
+          }),
+          Expires            = DateTime.UtcNow.AddHours(8),
+          SigningCredentials = new SigningCredentials(
+              new SymmetricSecurityKey(key),
+              SecurityAlgorithms.HmacSha256Signature
+          )
+      };
+      var token = tokenHandler.CreateToken(tokenDescriptor);
+
+      // 4. Log the login action
+      await _logRepo.CreateAsync(new SystemLog {
+          UserId = user.Id, Action = "Login", Resource = "Auth"
+      });
+
+      // 5. Return everything the frontend needs
+      return Ok(new AuthResponse {
+          Token    = tokenHandler.WriteToken(token),
+          UserId   = user.Id,
+          FullName = user.FullName,
+          Email    = user.Email,
+          Role     = user.Role
+      });
+  }
+
+  - BCrypt.Verify(plain, hashed)
+      Compares the typed password against the stored hash.
+      Never decrypts, just checks if they match.
+
+  - JWT (JSON Web Token)
+      A digitally signed string like "eyJhb...".
+      Contains your userId, email, role.
+      The backend can verify it without checking the database every time.
+
+  - Claims
+      Pieces of information baked into the token: who you are, what role you have.
+
+  - Expires = DateTime.UtcNow.AddHours(8)
+      Token automatically expires in 8 hours.
+
+  - HmacSha256Signature
+      The digital signature algorithm that prevents tampering.
+
+
+--------------------------------------------------------------------------------
+STEP 9 - JWT INTERCEPTOR (AUTOMATIC TOKEN ATTACHMENT)
+--------------------------------------------------------------------------------
+
+File: TradeNet-Frontend/src/app/core/interceptors/jwt.interceptor.ts
+
+  export const jwtInterceptor: HttpInterceptorFn = (req, next) => {
+    const auth = inject(AuthService);
+
+    if (req.url.includes('/auth/')) {
+      return next(req);   // skip token for login/register
+    }
+
+    const token  = auth.token();
+    const userId = auth.userId();
+
+    if (token) {
+      const authReq = req.clone({
+        setHeaders: {
+          'Authorization': `Bearer ${token}`,
+          'X-User-Id':     userId?.toString() ?? ''
+        }
+      });
+      return next(authReq);
+    }
+
+    return next(req);
+  };
+
+  - Interceptor
+      Sits between your service and the HTTP call, like a checkpoint.
+
+  - req.clone(...)
+      HTTP requests are immutable, so you make a copy with new headers added.
+
+  - Authorization: Bearer {token}
+      Standard HTTP auth header. The backend reads this to know who you are.
+
+  - X-User-Id
+      Custom header so the backend knows your userId without decoding
+      the full token.
+
+
+--------------------------------------------------------------------------------
+STEP 10 - BACKEND VERIFIES THE JWT ON PROTECTED ROUTES
+--------------------------------------------------------------------------------
+
+In each API's Program.cs:
+
+  builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+      .AddJwtBearer(options => {
+          options.TokenValidationParameters = new TokenValidationParameters {
+              ValidateIssuerSigningKey = true,
+              IssuerSigningKey        = new SymmetricSecurityKey(
+                  Encoding.ASCII.GetBytes(builder.Configuration["Jwt:Key"]!)
+              ),
+              ValidateIssuer   = true,
+              ValidIssuer      = "TradeNetAPI",
+              ValidateAudience = true,
+              ValidAudience    = "TradeNetClients",
+          };
+      });
+
+  app.UseAuthentication();  // "who are you?"
+  app.UseAuthorization();   // "are you allowed to do this?"
+
+  - AddJwtBearer
+      Registers JWT validation middleware.
+
+  - IssuerSigningKey
+      Uses the same secret key to verify the token was not tampered with.
+
+  - UseAuthentication()
+      Reads the Authorization header and decodes the token.
+
+  - UseAuthorization()
+      Checks if the decoded user has permission.
+
+Controllers use:
+
+  [Authorize(Roles = "SystemAdmin")]  // only Admins can call these endpoints
+  [ApiController]
+  [Route("api/admin")]
+  public class AdminController : ControllerBase { ... }
+
+  - [Authorize(Roles = "SystemAdmin")]
+      If your JWT does not have role = SystemAdmin, you get 403 Forbidden.
+
+
+--------------------------------------------------------------------------------
+STEP 11 - FULL EXAMPLE: BUSINESS TRADER APPLIES FOR A LICENSE
+--------------------------------------------------------------------------------
+
+  USER CLICKS "Apply for License"
+           |
+           v
+  BusinessTrader Component (Angular)
+    licenseService.applyForLicense(licenseId, { applicationNotes: "..." })
+           |
+           v
+  HTTP POST https://localhost:7002/api/business-trader/licenses/{id}/apply
+  + Header: Authorization: Bearer eyJhb...
+  + Header: X-User-Id: 5
+  + Body:   { "applicationNotes": "I need this for export" }
+           |
+           v
+  BusinessTrader API (7002) - JWT verified OK
+    BusinessTraderController.ApplyForLicense(id, request)
+           |
+           v
+    1. Read X-User-Id from header -> find BusinessTrader by userId
+    2. Check the TradeLicense exists and is Active
+    3. Check no duplicate application exists
+    4. Create new LicenseApplication {
+           BusinessTraderId = trader.Id,
+           TradeLicenseId   = id,
+           Status           = "Pending",
+           ApplicationNotes = request.applicationNotes
+       }
+    5. _context.LicenseApplications.Add(application)
+    6. await _context.SaveChangesAsync()
+       -> SQL: INSERT INTO LicenseApplications (...) VALUES (...)
+    7. Create Notification for the trader
+    8. Return 200 OK
+           |
+           v
+  Angular receives 200 OK -> shows "Application submitted successfully"
+
+
+--------------------------------------------------------------------------------
+DATABASE TABLES SUMMARY
+--------------------------------------------------------------------------------
+
+  Users                  <- all accounts (any role)
+  BusinessTraders        <- extra profile for trader users (1:1 with Users)
+  Businesses             <- companies owned by traders (1:N with BusinessTraders)
+  TraderDocuments        <- personal ID docs uploaded by traders
+  BusinessDocuments      <- company docs (registration cert, etc.)
+  TradeLicenses          <- available license types (created by admin/officer)
+  LicenseApplications    <- trader's requests to get a license
+  Transactions           <- financial transactions logged by traders
+  TradePrograms          <- government programs (created by Program Manager)
+  Subsidies              <- applications for financial aid from a program
+  Resources              <- equipment/assets within a trade program
+  ComplianceRecords      <- audit trail of compliance checks
+  Complaints             <- complaints filed by traders
+  Violations             <- violations recorded against businesses
+  Audits                 <- formal government audits
+  Reports                <- generated PDF/data reports
+  Notifications          <- in-app alerts for each user
+  SystemLogs             <- every login/action recorded for security
+
+
+--------------------------------------------------------------------------------
+COMPLETE FLOW SUMMARY (VISUAL)
+--------------------------------------------------------------------------------
+
+  BROWSER              ANGULAR               BACKEND APIs          DATABASE
+    |                     |                       |                    |
+    |-- user types URL -->|                       |                    |
+    |                Guard checks token           |                    |
+    |                If no token -> /login        |                    |
+    |                     |                       |                    |
+    |-- submits form ---->|                       |                    |
+    |                Service.method()             |                    |
+    |                http.post(url, data)         |                    |
+    |                JWT Interceptor adds         |                    |
+    |                Bearer token header          |                    |
+    |                     |---- HTTP Request ---->|                    |
+    |                     |              UseAuthentication()           |
+    |                     |              Decodes JWT token             |
+    |                     |              [Authorize] checks role       |
+    |                     |              Controller method runs        |
+    |                     |              Repository called             |
+    |                     |                       |--- EF Core SQL --->|
+    |                     |                       |               INSERT/
+    |                     |                       |               SELECT/
+    |                     |                       |               UPDATE
+    |                     |                       |<-- Returns data ---|
+    |                     |<---- JSON Response ---|                    |
+    |                Component updates UI         |                    |
+    |<-- Page re-renders--|                       |                    |
+
+
+--------------------------------------------------------------------------------
+KEY INSIGHT
+--------------------------------------------------------------------------------
+
+  - ANGULAR    : handles what the user sees (the frontend)
+  - 6 APIs     : handle business logic (the backend)
+  - SQL SERVER : stores all the data permanently (the database)
+
+  The JWT token is the PASSPORT that travels with every request so the
+  backend always knows WHO is asking and WHETHER they are allowed to do it.
+
+
+--------------------------------------------------------------------------------
+SEEDED TEST USERS (Password for all: password123)
+--------------------------------------------------------------------------------
+
+  trader@tradenet.local      -> BusinessTrader     (register businesses, apply for licenses)
+  officer@tradenet.local     -> TradeOfficer        (verify documents, approve applications)
+  manager@tradenet.local     -> ProgramManager      (manage trade programs & subsidies)
+  admin@tradenet.local       -> SystemAdmin         (user management, system monitoring)
+  compliance@tradenet.local  -> ComplianceOfficer   (investigate complaints, record violations)
+  auditor@tradenet.local     -> GovernmentAuditor   (audit businesses, generate reports)
+
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================
